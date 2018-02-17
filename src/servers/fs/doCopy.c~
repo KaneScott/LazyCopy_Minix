@@ -1,0 +1,133 @@
+#include "fs.h"
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <minix/callnr.h>
+#include <minix/com.h>
+#include <signal.h>
+#include <fcntl.h>
+#include "buf.h"
+#include "file.h"
+#include "fproc.h"
+#include "inode.h"
+#include "lock.h"
+#include "param.h"
+#include "super.h"
+
+
+PRIVATE char mode_map[] = { R_BIT, W_BIT, R_BIT | W_BIT, 0 };
+/*====================================== =====================================*
+ *				do_copy			     *
+ *===========================================================================*/
+/*  49 = syscall number */
+PUBLIC int do_copy() {
+	/* using m1 message input */
+	int r, c;
+	struct filp *fil_ptrp, *fil_ptrc;
+	register struct inode *rip;
+	register int oflags;
+	block_t b;
+	short scale;
+        mode_t bits;
+	struct buf *bp;
+	oflags = O_WRONLY | O_CREAT | O_TRUNC;
+	
+	printf("IN SYS CALL \n");
+	/* Find parents file descriptor */
+	fil_ptrp = fp->fp_filp[m_in.fd];
+
+	/* See if file descriptor and filp slots are available */
+    	bits = (mode_t) mode_map[oflags & O_ACCMODE];
+	if ((r = get_fd(0, bits, &m_in.fd, &fil_ptrc)) != OK)
+		return (r);
+
+	/* Allocate new inode if possible */
+	/* rip = new_node(user_path, m_in.mode, NO_ZONE);*/	
+	rip = new_node(user_path, R_BIT | W_BIT, NO_ZONE);
+	r = err_code;
+	if (r != EEXIST)
+		return (r); /* error */
+
+	/* Create a copy of the inode that the file process refers to */
+	rip->i_mode = fil_ptrp->filp_ino->i_mode;
+	rip->i_nlinks = 1;
+	rip->i_uid = fil_ptrp->filp_ino->i_uid;
+	rip->i_gid = fil_ptrp->filp_ino->i_gid;
+	rip->i_size = fil_ptrp->filp_ino->i_size;
+	rip->i_atime = fil_ptrp->filp_ino->i_atime;
+	rip->i_mtime = fil_ptrp->filp_ino->i_mtime;
+	rip->i_ctime = fil_ptrp->filp_ino->i_ctime;
+	/* Copy from zones from 0 - 8. Excludes 9 as that is the empty triple indirect zone that is used for tracking parent node. */
+	for(c = 0; c < V2_NR_TZONES - 1; c = c + 1) {
+		rip->i_zone[c] = fil_ptrp->filp_ino->i_zone[c];
+	}
+
+	/* Create new file process for copied inode */
+	fp->fp_filp[m_in.fd] = fil_ptrc;
+	fil_ptrc->filp_count = 1;
+	fil_ptrc->filp_ino = rip;
+	fil_ptrc->filp_flags = oflags;
+        
+	
+	/* Create custom data block in empty triple indirect zone space
+	   Data block contained within child, points to parent		
+	 */
+	scale = rip->i_sp->s_log_zone_size;
+	if (fil_ptrp->filp_ino->i_zone[9] == NO_ZONE) {
+		/* Allocate new data block as one does not exist yet (first time file has been copied) */
+		rip->i_zone[9] = alloc_zone(rip->i_dev, rip->i_zone[9]);
+		b = (block_t) rip->i_zone[9] << scale;
+		bp = get_block(rip->i_dev, b, NORMAL);
+		zero_block (bp);
+		printf("Allocated triple indirect zone to program \n");
+	} else {
+		/* Retreive existing data block for pointer manipulation */
+		printf("Retreiving the zone[9] from inode \n");
+		b = (block_t) rip->i_zone[9] << scale;
+		bp = get_block(rip->i_dev, b, NORMAL);
+	}
+	/* Create pointer to parent node */
+	/* bp->b_data[0] = parent; */
+	/* Copies pointer to byte array, unsure of functionality */
+	/*Marshall.Copy(fil_ptrp->filp_ino, bytes, 0, BLOCK_SIZE);*/
+	put_block(bp, FULL_DATA_BLOCK);
+	put_inode(rip);  
+
+	/* Create custom data block in empty triple indirect zone space
+	   Data block contained within child, points to parent		
+	 */
+	scale = fil_ptrp->filp_ino->i_sp->s_log_zone_size;
+	if (rip->i_zone[9] == NO_ZONE) {
+		/* Allocate new data block as one does not exist yet (first time file has been copied) */
+		fil_ptrp->filp_ino->i_zone[9] = alloc_zone(fil_ptrp->filp_ino->i_dev, fil_ptrp->filp_ino->i_zone[9]);
+		b = (block_t) fil_ptrp->filp_ino->i_zone[9] << scale;
+		bp = get_block(fil_ptrp->filp_ino->i_dev, b, NORMAL);
+		zero_block (bp);
+		printf("Allocated triple indirect zone to program \n");
+	} else {
+		/* Retreive existing data block for pointer manipulation */
+		printf("Retreiving the zone[9] from inode \n");
+		b = (block_t) fil_ptrp->filp_ino->i_zone[9] << scale;
+		bp = get_block(fil_ptrp->filp_ino->i_dev, b, NORMAL);
+	}
+	/* Create pointer to parent node */
+	/* bp->b_data[0] = rip; */
+	/* Copies pointer to byte array, unsure of functionality */
+	/*Marshall.Copy(fil_ptrp->filp_ino, bytes, 0, BLOCK_SIZE);*/
+
+	
+
+	put_block(bp, FULL_DATA_BLOCK);
+	put_inode(fil_ptrp->filp_ino); 
+	return(OK);
+
+
+}
+
+int hibit(unsigned int n) {
+    n |= (n >>  1);
+    n |= (n >>  2);
+    n |= (n >>  4);
+    n |= (n >>  8);
+    n |= (n >> 16);
+    return n - (n >> 1);
+}

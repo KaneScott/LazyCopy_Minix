@@ -1,0 +1,9 @@
+#include <stdio.h>
+#include <unistd.h>
+#include <lib.h>
+
+int main(void){
+	Message m = new Message(70);
+	_sendrec(m);
+
+}
